@@ -1,0 +1,27 @@
+check,rows_affected,action
+Line with unclosed quote (truncated export),2,"quote closed on file lines [498, 499]"
+Exact duplicate rows,0,dropped
+Duplicate case_number (PK),0,kept the most recently updated record
+Missing case_number,0,dropped (cannot be stored without a primary key)
+Date in a different format from the rest,0,parsed with the matching format
+Date has no time of day (date only),498,time set to 00:00 – hour-of-day analysis is NOT possible for these rows
+Date missing / unparseable,0,dropped (no time information = unusable)
+Crime date in the future,0,dropped
+date_of_update earlier than date,0,flagged only (kept)
+year column disagrees with date,0,year rebuilt from date
+arrest missing/unrecognised,0,set to False (no record of an arrest/domestic flag)
+domestic missing/unrecognised,0,set to False (no record of an arrest/domestic flag)
+IUCR code not in lookup table,0,primary_type = 'UNKNOWN'
+Missing iucr_code,0,dropped
+Missing district_code,0,derived from beat_num
+Missing location_desc,4,filled with 'UNKNOWN'
+Missing ward_no,0,kept as NULL
+Missing community_code,0,kept as NULL
+Longitude with missing minus sign,0,sign corrected
+Coordinates outside Chicago,0,lat/long/x/y set to NULL
+Duplicate ward_no in ward offices file,8,"kept the last (newest) record for wards [2, 6, 20, 27, 30, 31, 35, 45]"
+Duplicate beat_num in police beat file,2,identical rows – duplicates dropped
+Orphan FK beat_num,0,set to NULL
+Orphan FK district_code,0,set to NULL
+Orphan FK ward_no,0,set to NULL
+Orphan FK community_code,0,set to NULL
