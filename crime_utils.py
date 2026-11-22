@@ -3,6 +3,7 @@ crime_utils.py
 --------------
 Small shared helpers used by all four notebooks:
   * file paths
+  * reading the crime CSV (repairs the truncated last lines) and parsing dates in several formats
   * MySQL connection settings (read from environment variables / .env)
   * SQLAlchemy engine  (used for bulk loading + pd.read_sql)
   * mysql-connector connection (used in Use Case 4, as the assignment asks)
@@ -48,18 +49,67 @@ def data_file(key):
 
 
 def read_csv_repaired(path, **kwargs):
-    """Read a CSV whose lines may have an unclosed double quote (e.g. a truncated export).
+    """Read a CSV where some lines may have an unclosed double quote (e.g. a truncated export).
 
-    A line with an odd number of '"' characters makes the CSV parser swallow the following
-    line(s) into one field. We close the quote at the end of such lines before parsing.
+    An unclosed quote makes the parser swallow the next line(s) into one field, so that record
+    ends up with the wrong number of fields. Only records like that get repaired: a quote is
+    closed at the end of each of their lines that has an odd number of '"'. A properly quoted
+    field that spans several lines still has the right field count, so it is left alone.
     Returns (DataFrame, list_of_repaired_line_numbers)."""
+    import csv
     import io
     import pandas as pd
 
-    lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
-    repaired = [i + 1 for i, l in enumerate(lines) if l.count('"') % 2 == 1]
-    fixed = [l + '"' if l.count('"') % 2 == 1 else l for l in lines]
-    return pd.read_csv(io.StringIO("\n".join(fixed)), **kwargs), repaired
+    text = Path(path).read_text(encoding="utf-8-sig")
+    lines = text.splitlines()
+    n_fields = len(next(csv.reader([lines[0]])))
+
+    reader = csv.reader(io.StringIO(text, newline=""))
+    to_fix, start = set(), 1
+    for record in reader:
+        end = reader.line_num                      # physical lines start..end make up this record
+        if len(record) != n_fields:
+            to_fix.update(n for n in range(start, end + 1) if lines[n - 1].count('"') % 2 == 1)
+        start = end + 1
+
+    fixed = [l + '"' if (i + 1) in to_fix else l for i, l in enumerate(lines)]
+    frame = pd.read_csv(io.StringIO("\n".join(fixed)), **kwargs)
+    bad = [r for r in csv.reader(io.StringIO("\n".join(fixed), newline="")) if len(r) != n_fields]
+    if bad:
+        raise ValueError(f"{len(bad)} record(s) still have the wrong number of fields after repair")
+    return frame, sorted(to_fix)
+
+
+# ----------------------------------------------------------------------------
+# Dates
+# ----------------------------------------------------------------------------
+DATE_FORMATS = [
+    "%m/%d/%Y %H:%M",          # 5/3/2016 23:40         (expected)
+    "%m/%d/%Y %I:%M:%S %p",    # 05/03/2016 11:40:00 PM (Chicago data-portal export)
+    "%m/%d/%Y %H:%M:%S",       # 05/03/2016 23:40:00
+    "%Y-%m-%d %H:%M:%S",       # 2016-05-03 23:40:00    (ISO)
+    "%Y-%m-%d %H:%M",
+    "%m/%d/%Y",                # date only
+]
+
+
+def parse_mixed_dates(series):
+    """Parse a text column that may contain several date formats.
+    Tries DATE_FORMATS in order. Returns (parsed_datetimes, format_used_per_row)."""
+    import pandas as pd
+
+    s = series.astype("string").str.strip()
+    parsed = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    fmt_used = pd.Series(pd.NA, index=s.index, dtype="string")
+    for fmt in DATE_FORMATS:
+        todo = parsed.isna() & s.notna()
+        if not todo.any():
+            break
+        attempt = pd.to_datetime(s[todo], format=fmt, errors="coerce")
+        ok = attempt.dropna().index
+        parsed.loc[ok] = attempt.loc[ok]
+        fmt_used.loc[ok] = fmt
+    return parsed, fmt_used
 
 DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -76,7 +126,10 @@ def _load_dotenv():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+                v = v.strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":   # MYSQL_PASSWORD="abc" -> abc
+                    v = v[1:-1]
+                os.environ.setdefault(k.strip(), v)
 
 
 _load_dotenv()

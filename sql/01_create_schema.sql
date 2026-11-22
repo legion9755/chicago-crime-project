@@ -105,8 +105,6 @@ CREATE TABLE police_beat_info (
 -- ---------------------------------------------------------------------
 -- Fact table: one row per reported incident
 -- case_number is the PK (as in the data model); id is kept UNIQUE.
--- year / month / day_of_week / hour are derived columns stored for fast
--- reporting (a deliberate, documented denormalization).
 -- ---------------------------------------------------------------------
 CREATE TABLE chicago_crime (
     id              BIGINT        NOT NULL,
@@ -125,9 +123,6 @@ CREATE TABLE chicago_crime (
     x_coordinate    INT,
     y_coordinate    INT,
     year            SMALLINT      NOT NULL,
-    month           TINYINT       NOT NULL,
-    day_of_week     VARCHAR(9)    NOT NULL,
-    hour            TINYINT       NOT NULL,
     date_of_update  DATETIME,
     latitude        DECIMAL(11,8),
     longitude       DECIMAL(11,8),
@@ -135,7 +130,6 @@ CREATE TABLE chicago_crime (
     PRIMARY KEY (case_number),
     UNIQUE KEY uq_crime_id (id),
     INDEX idx_crime_year (year),
-    INDEX idx_crime_year_month (year, month),
     INDEX idx_crime_community (community_code),
     CONSTRAINT fk_crime_iucr      FOREIGN KEY (iucr_code)      REFERENCES iucr(iucr_code),
     CONSTRAINT fk_crime_beat      FOREIGN KEY (beat_num)       REFERENCES police_beat_info(beat_num),
