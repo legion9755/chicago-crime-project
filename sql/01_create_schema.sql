@@ -127,7 +127,7 @@ CREATE TABLE chicago_crime (
     year            SMALLINT      NOT NULL,
     month           TINYINT       NOT NULL,
     day_of_week     VARCHAR(9)    NOT NULL,
-    hour            TINYINT       NOT NULL,
+    hour            TINYINT       NULL,      -- NULL when the source date has no time of day
     date_of_update  DATETIME,
     latitude        DECIMAL(11,8),
     longitude       DECIMAL(11,8),

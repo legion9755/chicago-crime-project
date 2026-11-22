@@ -32,8 +32,10 @@ chicago_crime_project/
 ├── 02_eda_visualization.ipynb
 ├── 03_statistical_insights.ipynb
 ├── 04_mysql_reporting.ipynb
-├── crime_utils.py                 ← paths, DB connections, plot style
-├── requirements.txt
+├── crime_utils.py                 ← paths, DB connections, CSV repair, date parser, confidence intervals, plot style
+├── tests/test_crime_utils.py      ← pytest tests for the helpers in crime_utils.py
+├── requirements.txt               ← exact versions used for the committed outputs
+├── requirements-lock.txt          ← full pip freeze
 └── .env.example                   ← copy to .env and add your MySQL password
 ```
 
@@ -48,7 +50,9 @@ chicago_crime_project/
 
 ```bash
 # 1. install libraries (a virtual environment is recommended)
+#    The committed outputs were made with Python 3.14.7 and the exact versions in requirements.txt
 pip install -r requirements.txt
+python -m pytest -q          # optional: tests for the helper functions
 
 # 2. MySQL 8.0+ must be running. Copy the settings file and add your password
 cp .env.example .env          # Windows: copy .env.example .env
@@ -62,7 +66,15 @@ jupyter notebook
 ```
 
 Notebook 01 must run first: it creates the clean data file and fills MySQL. Notebooks 02 and 03
-read the clean file, and 04 reads only from MySQL.
+read the clean file, and 04 reads only from MySQL. Before committing, use **Restart & Run All** on
+each notebook so the saved outputs come from one clean top-to-bottom run. To run all four from
+the command line:
+
+```bash
+for nb in 01_load_and_clean 02_eda_visualization 03_statistical_insights 04_mysql_reporting; do
+  jupyter nbconvert --to notebook --execute --inplace "$nb.ipynb" || break
+done
+```
 
 **Common problems**
 
@@ -75,6 +87,7 @@ read the clean file, and 04 reads only from MySQL.
 | `Data too long for column` | a text value is longer than the schema allows; widen that `VARCHAR` in `01_create_schema.sql` |
 | `window function` syntax error | MySQL older than 8.0; upgrade (5.7 has no `OVER()`) |
 | `Cannot add or update a child row: a foreign key constraint fails` | a lookup file is missing rows; notebook 01 already nulls orphans, so make sure you re-ran it from the top |
+| `Duplicate entry '0110' for key 'iucr.PRIMARY'` | an older version of the load cell only appended. The current one empties the tables first; pull the latest notebook 01 |
 
 ---
 
@@ -96,7 +109,12 @@ names are used in MySQL.
 **2. Clean.**
 
 * **Duplicates:** exact duplicate rows are dropped. `case_number` is the primary key, so if it
-  repeats we keep the most recently updated record.
+  repeats we keep the most recently updated record. `date_of_update` is parsed with the same
+  multi-format parser as `date` (it's date-only here, so a fixed `%m/%d/%Y %H:%M` format would
+  turn it all into NaT and the "keep the latest" sort would do nothing). Four near-duplicate
+  pairs (same date, block, crime code and coordinates, different case numbers, e.g. HZ251540 and
+  HZ251541) are kept: they're most likely several victims of one incident. They're logged as
+  checked.
 * **Date to datetime:** instead of a single `pd.to_datetime` call, which silently turns any value
   in an unexpected format into `NaT`, we try a list of known formats in order and record which one
   matched each row. That gives a direct answer to "are there date-format anomalies?". Logical
@@ -108,7 +126,8 @@ names are used in MySQL.
   | Field | Action | Reason |
   |---|---|---|
   | date, case_number, iucr_code | drop row | unusable without them |
-  | district_code | derived from `beat_num` | each beat belongs to exactly one district, so this is a lookup, not a guess |
+  | district_code | derived from `beat_num` | each beat belongs to exactly one district, so the beat lookup gives the real answer. If a beat isn't in the lookup, the fallback `beat // 100` is a guess, and it's logged separately (0 rows needed either in this file) |
+  | hour | NULL when the source has no time | a date-only value would otherwise become `hour = 0`, a fake midnight |
   | location_desc | `"UNKNOWN"` | keeps the row and makes the gap visible |
   | ward_no, community_code, lat/long | left NULL | guessing would distort area-level results |
   | arrest, domestic | False if missing | no record of an arrest |
@@ -122,7 +141,9 @@ names are used in MySQL.
   on `iucr_code`. Codes that aren't in the lookup become `UNKNOWN` and are reported.
 
 **3. New features.** `df['date'].dt.year / .dt.month / .dt.day_name() / .dt.hour`. The `.dt`
-accessor only works once the column is a real datetime, which is why step 2 comes first.
+accessor only works once the column is a real datetime, which is why step 2 comes first. `hour`
+is only filled when the source value had a time; otherwise it's NULL (in MySQL too, the column is
+nullable). In this file that's every row.
 
 **4. NumPy.** `df.isna().to_numpy()` is a True/False matrix. `np.mean(mask, axis=0) * 100` is
 the percentage missing per column, because the mean of 1s and 0s is the share of 1s. Columns over
@@ -134,8 +155,8 @@ destroy the analysis, so that case needs investigating rather than deleting.
 `primary_type` is stored only in `iucr` (normalisation), while year/month/day/hour are stored on
 the fact table for fast reporting (a deliberate denormalisation). Data is written with
 SQLAlchemy + PyMySQL `df.to_sql(...)`: **lookup tables first, fact table last**, otherwise the
-foreign keys reject rows. The notebook then verifies that the MySQL row counts equal the
-DataFrame.
+foreign keys reject rows. The load cell empties the tables first (fact table first), so it can be
+run again on its own. The notebook then verifies that the MySQL row counts equal the DataFrame.
 
 **Questions answered in the notebook:** number of unique crime types (`primary_type.nunique()`),
 and a full anomaly table (`output/data_quality_report.csv`).
@@ -148,7 +169,9 @@ and a full anomaly table (`output/data_quality_report.csv`).
 * **Top 10 categories:** `value_counts()` and `value_counts(normalize=True) * 100` give counts
   and percentages.
 * **Arrest rate:** `df['arrest'].mean() * 100`, since the mean of booleans is the share that are
-  True. It's also broken down by category.
+  True. It's also broken down by category, with a 95% Wilson confidence interval on each rate
+  (`cu.wilson_ci`). The notebook also compares the extract days (3–4 May 2016) with the older,
+  late-arriving records, because those older records have a much higher arrest rate.
 * **Heatmap:** `pivot_table(index='month', columns='day_of_week', aggfunc='count')`, with the
   columns re-ordered Monday to Sunday and drawn with `sns.heatmap`.
 * **Top community areas:** counts joined to community names, shown as a bar chart.
@@ -156,20 +179,27 @@ and a full anomaly table (`output/data_quality_report.csv`).
 * **Q: is the arrest rate consistent?** The per-year rate plus its standard deviation, range and
   trend slope. A range of more than about 3 percentage points counts as not consistent.
 * **Q: highest month.** Both the total and **crimes per day** are shown, because months have
-  different lengths (February).
+  different lengths (February). Per day means divided by the calendar days of that month, summed
+  over every year the month appears in.
 
 ### Use Case 3 — Statistics and patterns
 
-* **Hourly:** `groupby('hour').size()` as a line plot, with peak and low hours and time-of-day
-  bands. As a bonus, a heatmap shows the hourly *shape* of each crime type.
+* **Hourly:** counts per known hour as a line plot, with peak and low hours and time-of-day
+  bands. As a bonus, a heatmap shows the hourly *shape* of each crime type. With this file the
+  chart is empty and says so, because no row has a time.
 * **NumPy community stats:** `np.mean`, `np.median`, `np.std`, `np.percentile` over the 77
   per-area counts. Mean > median means the distribution is right-skewed (a few areas dominate).
-  Crimes per 1,000 residents gives a fairer comparison.
+  Crimes per 1,000 residents gives a fairer comparison, but most areas have only a few crimes, so
+  each rate gets an exact Poisson 95% interval (`cu.poisson_ci`) and a second ranking only
+  includes areas with at least 10 crimes.
 * **Outliers:** IQR = Q3 − Q1, and the fences are Q1 − 1.5×IQR and Q3 + 1.5×IQR. The box plot
   uses this same rule for its dots, so the plot shows the outliers and the IQR code lists them.
-* **Correlation:** `.corr()` (Pearson, −1 to +1) on year, month, hour, weekday, arrest,
-  domestic, codes and coordinates, drawn as a masked heatmap. Correlation is not causation, and a
-  correlation between ID codes (ward vs community) only reflects how the numbers were assigned.
+  Each outlier is printed with its population rank and per-resident rate, because a high count is
+  often just a big population.
+* **Correlation:** `.corr()` (Pearson, −1 to +1) drawn as a masked heatmap, as the assignment
+  asks. Pearson on ID codes (district, ward, community) is meaningless, so the useful part is the
+  chi-square test with Cramér's V on the categorical pairs (arrest vs crime type, arrest vs
+  domestic, domestic vs crime type).
 
 ### Use Case 4 — MySQL reporting
 
@@ -186,8 +216,11 @@ and a full anomaly table (`output/data_quality_report.csv`).
 * **Pandas integration:** `pd.read_sql("SELECT * FROM vw_crime_yearly", conn)`, where `conn` is a
   SQLAlchemy connection (pandas warns when given a raw mysql-connector connection). MySQL
   `DECIMAL` values arrive as Python `Decimal` and are converted to numbers.
-* **Charts from MySQL:** crimes and arrest rate on two y-axes, category share vs arrest rate, and
-  per-capita community ranking.
+* **`summary_community`** starts from `city_community` and LEFT JOINs the crimes, so all 77 areas
+  are there (areas with no crimes get 0). An INNER JOIN would keep only 70 and bias any average.
+* **Charts from MySQL:** crimes and arrest rate on two y-axes (each year labelled with its n;
+  years under 30 crimes drawn hollow and marked unreliable), category share vs arrest rate, and a
+  per-capita community ranking limited to areas with at least 10 crimes, with 95% intervals.
 
 ---
 
@@ -198,13 +231,15 @@ and a full anomaly table (`output/data_quality_report.csv`).
 | Finding | Rows | Action |
 |---|---|---|
 | Crime CSV ends with **2 truncated lines** (unclosed `"` on the `location` field) — plain `pd.read_csv` crashes | 2 | quote closed before parsing (`read_csv_repaired`) |
-| `date` has **no time of day** (`5/3/2016`), and one consistent format | 498 (all) | parsed as `%m/%d/%Y`; hour analysis impossible |
+| `date` has **no time of day** (`5/3/2016`), and one consistent format | 498 (all) | parsed as `%m/%d/%Y`; `hour` stored as NULL, hour analysis impossible |
+| File looks Excel-saved: `m/d/yyyy` dates with no time, upper-case `TRUE`/`FALSE`. The data-portal export normally includes times, so they were most likely lost before the file was handed over | – | noted; the raw export would bring back the hourly analysis |
+| Near-duplicates: same date, block, crime code and coordinates, different case numbers | 8 (4 pairs) | kept, most likely several victims of one incident |
 | Data concentrated in time: **89% of crimes on 3–4 May 2016**; the rest go back to 2012 (late reports); every `date_of_update` is May 2016 | 443 | flagged — this is a snapshot, not a history |
 | Missing `location_desc` | 4 | `'UNKNOWN'` |
 | Missing coordinates / location | 29 (5.8%) | kept NULL |
 | IUCR file: named `iucr_codes.csv.csv`; header `IUCR`, `PRIMARY_TYPE␣` (trailing space), `INDEX CODE` | – | file name accepted; headers normalised |
 | IUCR codes stored without leading zero (`486` vs `0486`) | – | `zfill(4)` on both sides; 100% matched |
-| Ward file: key column `ward` (not `ward_no`), extra `location_*` columns, **8 wards listed twice** (old + new office/alderman) | 8 | renamed; kept the last (newest) record |
+| Ward file: key column `ward` (not `ward_no`), extra `location_*` columns, **8 wards listed twice** (old + new office/alderman) | 8 | renamed; kept the last (newest) record. Caveat: several newer aldermen (Cruz, ward 30; Hall, ward 6; Quezada, ward 35) took office in 2023, after these 2016 crimes, so "newest" is not "in office on the crime date". Ward 27's two rows are the same person spelled two ways |
 | Beat file: beat `3100` appears 3 times (identical) | 2 | de-duplicated |
 | Duplicates, future dates, out-of-Chicago coordinates, `year` mismatches | 0 | checked — none found |
 | Columns > 50% missing | none (max 5.8%) | nothing dropped |
@@ -217,15 +252,17 @@ and a full anomaly table (`output/data_quality_report.csv`).
 |---|---|
 | Most frequent category | **THEFT** — 105 of 498 crimes (21.1%), then BATTERY (17.1%), CRIMINAL DAMAGE (9.8%) |
 | Top 5 share | 63.5% of all crimes |
-| Overall arrest rate | **24.9%** (124 / 498). NARCOTICS 100%, CRIMINAL TRESPASS 88%, THEFT 9.5%, MOTOR VEHICLE THEFT 0% |
+| Overall arrest rate | **24.9%** (124 / 498), but this is pulled up by how the extract was taken. Rows dated 3–4 May 2016 (443) have 22.3% (95% CI 18.7–26.5%); the 55 older, late-arriving rows have 45.5% (33.0–58.5%). 14 of those are dated the 1st of a month, a common stand-in for an unknown date. 22.3% is the better estimate for a typical day |
+| Arrest rate by category (95% CI) | NARCOTICS 100% (89–100), CRIMINAL TRESPASS 88% (66–97), ASSAULT 28.6% (16.3–45.1), BATTERY 23.5% (15.8–33.6), ROBBERY 20.0% (9.5–37.3), THEFT 9.5% (5.3–16.6). Theft vs Battery is a real difference (Fisher's exact test p = 0.01, even though the intervals touch); Assault, Robbery, Battery and Other Offense can't be told apart (e.g. Assault vs Robbery p = 0.57) |
 | Crime rising or falling over years? | **Cannot be determined.** 2016 holds 98.4% of rows and no year is complete; the upward-looking chart is an artefact of how the extract was taken |
 | Arrest rate consistent across years? | **Cannot be judged.** Only 2016 has enough crimes (490); 2012–2015 have 1–4 crimes each, so their rates (0–100%) are noise |
-| Month with highest frequency | **May** (447 crimes, 89.8%), which reflects the extract date, not seasonality |
+| Month with highest frequency | **May** (447 crimes, 89.8%; 4.81 per calendar day), which reflects the extract date, not seasonality |
 | Busiest heatmap cell | May / Wednesday (= 4 May 2016) |
-| Hourly pattern | **Not available**: no times in the source, so every crime lands at 00:00 |
+| Hourly pattern | **Not available**: no times in the source, so `hour` is NULL for every crime |
 | Top community areas | Austin (34), Near North Side (20), Humboldt Park (20), then South Shore, Englewood, South Lawndale (16 each) |
-| Community outliers (IQR) | Q1 = 2, Q3 = 9, IQR = 7, upper fence 19.5 → **Austin, Near North Side, Humboldt Park** |
-| Correlations | No meaningful crime relationships (arrest vs year r ≈ −0.13). Strong correlations exist only among location codes (community vs latitude −0.74, district vs ward 0.72), which is geography, not insight. `hour` was dropped (constant) |
+| Community outliers (IQR) | Q1 = 2, Q3 = 9, IQR = 7, upper fence 19.5 → **Austin, Near North Side, Humboldt Park**. Mostly a population effect: Near North Side is the most populous area in the lookup and Austin the 3rd; per resident they're 0.19 and 0.34 per 1,000 against a city-wide 0.18 |
+| Crimes per 1,000 residents | Fuller Park tops the raw ranking on just 3 crimes (1.35, 95% CI 0.28–3.95), which overlaps most other areas. Among areas with ≥10 crimes: West Garfield Park 0.77 (0.40–1.34), Englewood 0.75 (0.43–1.21), East Garfield Park 0.58. The intervals overlap, so the order isn't reliable. Residents are the wrong denominator for the Loop and Near North Side (commuters and visitors) |
+| Correlations | Pearson: arrest vs year r = −0.13 is weak, and comes entirely from the 8 pre-2016 rows (the same late-record effect), so it says nothing about time. Location codes correlate with each other (community vs latitude −0.74, district vs ward 0.72), which is geography. Chi-square / Cramér's V: arrest vs crime type V = 0.60 (strong), domestic vs crime type V = 0.58, arrest vs domestic V = 0.01 (no link) |
 
 > **How to present this:** the pipeline, SQL and charts are complete. The honest conclusion is
 > that this 498-row extract supports *composition* questions (which crimes, where, arrest
@@ -252,3 +289,18 @@ and a full anomaly table (`output/data_quality_report.csv`).
   extract, not crime.
 * **Why the IQR rule and not mean ± 3σ?** The IQR rule is based on quartiles, so the outliers
   themselves don't distort it. The mean and σ get pulled by extreme values.
+* **Why is the overall arrest rate misleading?** Older records are only in the extract because
+  something happened to them recently, and they end in arrest twice as often (45.5% vs 22.3%).
+  It's the same selection effect that makes the yearly trend unreadable.
+* **Why Wilson intervals and not p ± 1.96·SE?** With small n and rates near 0% or 100%, the plain
+  formula gives intervals below 0 or above 100%, or zero width at 0%. Wilson behaves properly.
+* **The ward file has two records for some wards. Which one is right?** Neither on its own. It's a
+  slowly changing dimension: an alderman's office changes over time. The textbook fix (SCD Type
+  2) keeps every record with valid-from / valid-to dates and joins each crime to the record valid
+  on its date. The file has no term dates, so the notebook keeps the newest and says why that's
+  imperfect.
+* **Is it really a star schema?** Mostly. The fact table links to both `police_beat_info` and
+  `district_ps_info`, and a beat already belongs to a district, so the district is stored twice
+  (redundant, and a step towards a snowflake). It's kept because the district comes straight from
+  the source file and queries by district don't need the extra join. `police_beat_info.district`
+  has no foreign key to `district_ps_info`; adding one would be the next tidy-up.
