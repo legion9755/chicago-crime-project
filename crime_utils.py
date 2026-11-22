@@ -3,6 +3,7 @@ crime_utils.py
 --------------
 Small shared helpers used by all four notebooks:
   * file paths
+  * reading the crime CSV (repairs the truncated last lines) and parsing dates in several formats
   * MySQL connection settings (read from environment variables / .env)
   * SQLAlchemy engine  (used for bulk loading + pd.read_sql)
   * mysql-connector connection (used in Use Case 4, as the assignment asks)
@@ -90,7 +91,6 @@ DATE_FORMATS = [
     "%Y-%m-%d %H:%M",
     "%m/%d/%Y",                # date only
 ]
-DATE_ONLY_FORMATS = {"%m/%d/%Y"}
 
 
 def parse_mixed_dates(series):
@@ -110,33 +110,6 @@ def parse_mixed_dates(series):
         parsed.loc[ok] = attempt.loc[ok]
         fmt_used.loc[ok] = fmt
     return parsed, fmt_used
-
-
-# ----------------------------------------------------------------------------
-# Confidence intervals (small counts need them)
-# ----------------------------------------------------------------------------
-def wilson_ci(successes, n, z=1.96):
-    """95% Wilson score interval for a proportion, returned as (low, high) in 0..1.
-    Works well for small n and for rates near 0% or 100%, unlike the plain p ± 1.96·SE."""
-    import numpy as np
-
-    successes, n = np.asarray(successes, dtype=float), np.asarray(n, dtype=float)
-    p = successes / n
-    denom = 1 + z**2 / n
-    centre = (p + z**2 / (2 * n)) / denom
-    half = z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / denom
-    return centre - half, centre + half
-
-
-def poisson_ci(count, alpha=0.05):
-    """Exact (Garwood) 95% interval for a Poisson count, returned as (low, high)."""
-    import numpy as np
-    from scipy.stats import chi2
-
-    count = np.asarray(count, dtype=float)
-    low = np.where(count > 0, chi2.ppf(alpha / 2, 2 * count) / 2, 0.0)
-    high = chi2.ppf(1 - alpha / 2, 2 * (count + 1)) / 2
-    return low, high
 
 DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
